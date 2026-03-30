@@ -1,0 +1,40 @@
+"""
+Health & info routes — used by Render health checks and monitoring.
+"""
+from fastapi import APIRouter
+from app.schemas.analysis import HealthResponse, ModelInfoResponse
+from app.services.model_service import model_service
+from app.core.config import get_settings
+
+router = APIRouter(tags=["Health"])
+settings = get_settings()
+
+
+@router.get(
+    "/health",
+    response_model=HealthResponse,
+    summary="Health check",
+    description="Returns 200 when the API is running. models_loaded goes true after ~30s cold start.",
+)
+async def health() -> HealthResponse:
+    return HealthResponse(
+        status="ok",
+        models_loaded=model_service.is_ready(),
+        version=settings.APP_VERSION,
+    )
+
+
+@router.get(
+    "/models",
+    response_model=ModelInfoResponse,
+    summary="Model info",
+    description="Lists which HuggingFace models are in use and their supported labels.",
+)
+async def model_info() -> ModelInfoResponse:
+    return ModelInfoResponse(
+        sentiment_model=settings.SENTIMENT_MODEL,
+        emotion_model=settings.EMOTION_MODEL,
+        max_text_length=settings.MAX_TEXT_LENGTH,
+        supported_sentiment_labels=["positive", "negative", "neutral"],
+        supported_emotion_labels=["joy", "sadness", "anger", "fear", "surprise", "disgust", "neutral"],
+    )
