@@ -1,0 +1,152 @@
+"""
+Pydantic v2 schemas — request validation and response shapes.
+"""
+from __future__ import annotations
+from pydantic import BaseModel, Field, field_validator
+from typing import Optional
+from app.core.config import get_settings
+
+settings = get_settings()
+
+
+# ---------------------------------------------------------------------------
+# Shared primitives
+# ---------------------------------------------------------------------------
+
+class LabelScore(BaseModel):
+    """A single label and its confidence score."""
+    label: str
+    score: float = Field(ge=0.0, le=1.0)
+
+
+# ---------------------------------------------------------------------------
+# Nested result objects
+# ---------------------------------------------------------------------------
+
+class SentimentResult(BaseModel):
+    """Top-level sentiment with all scores."""
+    label: str = Field(description="positive | negative | neutral")
+    score: float = Field(ge=0.0, le=1.0, description="Confidence of the top label")
+    all_scores: list[LabelScore] = Field(description="All labels sorted by score desc")
+
+
+class EmotionResult(BaseModel):
+    """Fine-grained emotion breakdown."""
+    dominant_emotion: str = Field(description="Highest-scoring emotion")
+    score: float = Field(ge=0.0, le=1.0)
+    all_emotions: list[LabelScore] = Field(description="All 7 emotions sorted by score desc")
+
+
+# ---------------------------------------------------------------------------
+# Top-level responses
+# ---------------------------------------------------------------------------
+
+class AnalysisResponse(BaseModel):
+    """Full analysis result for a single text."""
+    text: str
+    char_count: int
+    sentiment: SentimentResult
+    emotions: EmotionResult
+
+    model_config = {"json_schema_extra": {
+        "example": {
+            "text": "I absolutely love this product!",
+            "char_count": 31,
+            "sentiment": {
+                "label": "positive",
+                "score": 0.9832,
+                "all_scores": [
+                    {"label": "positive", "score": 0.9832},
+                    {"label": "neutral",  "score": 0.0121},
+                    {"label": "negative", "score": 0.0047},
+                ]
+            },
+            "emotions": {
+                "dominant_emotion": "joy",
+                "score": 0.9211,
+                "all_emotions": [
+                    {"label": "joy",      "score": 0.9211},
+                    {"label": "surprise", "score": 0.0312},
+                    {"label": "neutral",  "score": 0.0211},
+                    {"label": "anger",    "score": 0.0101},
+                    {"label": "fear",     "score": 0.0088},
+                    {"label": "disgust",  "score": 0.0052},
+                    {"label": "sadness",  "score": 0.0025},
+                ]
+            }
+        }
+    }}
+
+
+class BulkItem(BaseModel):
+    """One item in a bulk analysis response."""
+    index: int
+    result: Optional[AnalysisResponse] = None
+    error: Optional[str] = None
+
+
+class BulkAnalysisResponse(BaseModel):
+    """Response for bulk text analysis."""
+    count: int
+    results: list[BulkItem]
+
+
+# ---------------------------------------------------------------------------
+# Request bodies
+# ---------------------------------------------------------------------------
+
+class AnalyseRequest(BaseModel):
+    """Single text analysis request."""
+    text: str = Field(
+        min_length=1,
+        max_length=512,
+        description="Text to analyse (max 512 characters)",
+        examples=["I absolutely love this new product!"],
+    )
+
+    @field_validator("text")
+    @classmethod
+    def strip_text(cls, v: str) -> str:
+        return v.strip()
+
+
+class BulkAnalyseRequest(BaseModel):
+    """Bulk analysis — up to 10 texts per request."""
+    texts: list[str] = Field(
+        min_length=1,
+        max_length=10,
+        description="List of texts to analyse (max 10 items)",
+    )
+
+    @field_validator("texts")
+    @classmethod
+    def validate_each(cls, v: list[str]) -> list[str]:
+        cleaned = []
+        for text in v:
+            text = text.strip()
+            if not text:
+                raise ValueError("Each text must be non-empty")
+            if len(text) > settings.MAX_TEXT_LENGTH:
+                raise ValueError(
+                    f"Each text must be under {settings.MAX_TEXT_LENGTH} characters"
+                )
+            cleaned.append(text)
+        return cleaned
+
+
+# ---------------------------------------------------------------------------
+# Health / info
+# ---------------------------------------------------------------------------
+
+class HealthResponse(BaseModel):
+    status: str
+    models_loaded: bool
+    version: str
+
+
+class ModelInfoResponse(BaseModel):
+    sentiment_model: str
+    emotion_model: str
+    max_text_length: int
+    supported_sentiment_labels: list[str]
+    supported_emotion_labels: list[str]
