@@ -1,0 +1,100 @@
+"""
+Analysis service — wraps raw model output into clean, typed results.
+"""
+import logging
+from app.services.model_service import model_service
+from app.schemas.analysis import (
+    SentimentResult,
+    EmotionResult,
+    AnalysisResponse,
+    LabelScore,
+    BulkAnalysisResponse,
+    BulkItem,
+)
+
+logger = logging.getLogger(__name__)
+
+# Map raw model labels to human-friendly names
+SENTIMENT_LABEL_MAP = {
+    "positive": "positive",
+    "negative": "negative",
+    "neutral": "neutral",
+    "LABEL_0": "negative",
+    "LABEL_1": "neutral",
+    "LABEL_2": "positive",
+}
+
+EMOTION_LABEL_MAP = {
+    "joy": "joy",
+    "sadness": "sadness",
+    "anger": "anger",
+    "fear": "fear",
+    "surprise": "surprise",
+    "disgust": "disgust",
+    "neutral": "neutral",
+}
+
+
+def _normalise_scores(raw: list[dict]) -> list[LabelScore]:
+    """
+    Convert raw pipeline output like [{'label': 'LABEL_2', 'score': 0.94}]
+    into sorted LabelScore objects with friendly names.
+    """
+    items = []
+    for entry in raw:
+        label = entry["label"].lower()
+        friendly = SENTIMENT_LABEL_MAP.get(label) or EMOTION_LABEL_MAP.get(label) or label
+        items.append(LabelScore(label=friendly, score=round(entry["score"], 4)))
+    # Sort descending by score
+    return sorted(items, key=lambda x: x.score, reverse=True)
+
+
+def analyse_text(text: str) -> AnalysisResponse:
+    """
+    Run both models on a single text string.
+    Returns structured sentiment + emotion results.
+    """
+    # --- Sentiment ---
+    raw_sentiment: list[dict] = model_service.sentiment(text)[0]
+    sentiment_scores = _normalise_scores(raw_sentiment)
+    top_sentiment = sentiment_scores[0]
+
+    sentiment_result = SentimentResult(
+        label=top_sentiment.label,
+        score=top_sentiment.score,
+        all_scores=sentiment_scores,
+    )
+
+    # --- Emotions ---
+    raw_emotion: list[dict] = model_service.emotion(text)[0]
+    emotion_scores = _normalise_scores(raw_emotion)
+    top_emotion = emotion_scores[0]
+
+    emotion_result = EmotionResult(
+        dominant_emotion=top_emotion.label,
+        score=top_emotion.score,
+        all_emotions=emotion_scores,
+    )
+
+    return AnalysisResponse(
+        text=text,
+        char_count=len(text),
+        sentiment=sentiment_result,
+        emotions=emotion_result,
+    )
+
+
+def analyse_bulk(texts: list[str]) -> BulkAnalysisResponse:
+    """
+    Analyse a list of texts (max 10). Each text gets its own result.
+    """
+    results = []
+    for i, text in enumerate(texts):
+        try:
+            result = analyse_text(text)
+            results.append(BulkItem(index=i, result=result, error=None))
+        except Exception as exc:
+            logger.warning("Bulk item %d failed: %s", i, exc)
+            results.append(BulkItem(index=i, result=None, error=str(exc)))
+
+    return BulkAnalysisResponse(count=len(texts), results=results)
