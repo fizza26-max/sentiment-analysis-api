@@ -1,0 +1,37 @@
+"""
+Core configuration — loads from environment variables with safe defaults.
+"""
+from pydantic_settings import BaseSettings
+from functools import lru_cache
+
+
+class Settings(BaseSettings):
+    # API metadata
+    APP_NAME: str = "SentimentAPI"
+    APP_VERSION: str = "1.0.0"
+    APP_DESCRIPTION: str = (
+        "Open-source sentiment & emotion analysis powered by HuggingFace Transformers"
+    )
+    DEBUG: bool = False
+
+    # Rate limiting
+    RATE_LIMIT_PER_MINUTE: int = 30
+
+    # Model config
+    # Primary: multilingual sentiment (positive/negative/neutral)
+    SENTIMENT_MODEL: str = "cardiffnlp/twitter-roberta-base-sentiment-latest"
+    # Secondary: 7 fine-grained emotions (joy, sadness, anger, fear, surprise, disgust, neutral)
+    EMOTION_MODEL: str = "j-hartmann/emotion-english-distilroberta-base"
+
+    # Max characters per request
+    MAX_TEXT_LENGTH: int = 512
+
+    class Config:
+        env_file = ".env"
+        case_sensitive = True
+
+
+@lru_cache()
+def get_settings() -> Settings:
+    """Cached settings instance — only loaded once at startup."""
+    return Settings()
