@@ -1,0 +1,175 @@
+"""
+Tests for SentimentAPI.
+
+Run with:  pytest tests/ -v
+"""
+import pytest
+from unittest.mock import patch, MagicMock
+from fastapi.testclient import TestClient
+
+# ---------------------------------------------------------------------------
+# We mock model loading so tests run without downloading ~500MB of weights.
+# In CI you could set USE_REAL_MODELS=1 to do a full integration test.
+# ---------------------------------------------------------------------------
+
+def make_mock_pipeline(labels_and_scores: list[dict]):
+    """Returns a callable that mimics a HuggingFace pipeline."""
+    mock = MagicMock()
+    mock.return_value = [labels_and_scores]
+    return mock
+
+
+MOCK_SENTIMENT = [
+    {"label": "positive", "score": 0.9832},
+    {"label": "neutral",  "score": 0.0121},
+    {"label": "negative", "score": 0.0047},
+]
+
+MOCK_EMOTION = [
+    {"label": "joy",      "score": 0.9211},
+    {"label": "sadness",  "score": 0.0312},
+    {"label": "neutral",  "score": 0.0211},
+    {"label": "anger",    "score": 0.0101},
+    {"label": "fear",     "score": 0.0088},
+    {"label": "disgust",  "score": 0.0052},
+    {"label": "surprise", "score": 0.0025},
+]
+
+
+@pytest.fixture(scope="module")
+def client():
+    """TestClient with mocked models."""
+    with patch("app.services.model_service.pipeline") as mock_pipeline:
+        mock_pipeline.side_effect = [
+            make_mock_pipeline(MOCK_SENTIMENT),
+            make_mock_pipeline(MOCK_EMOTION),
+        ]
+        # Patch is_ready so the app doesn't block on real loading
+        with patch("app.services.model_service.ModelService.is_ready", return_value=True):
+            with patch("app.services.model_service.ModelService.load"):
+                from app.main import app
+                with TestClient(app) as c:
+                    yield c
+
+
+# ---------------------------------------------------------------------------
+# Health
+# ---------------------------------------------------------------------------
+
+def test_health(client):
+    r = client.get("/health")
+    assert r.status_code == 200
+    data = r.json()
+    assert data["status"] == "ok"
+    assert "version" in data
+
+
+def test_model_info(client):
+    r = client.get("/models")
+    assert r.status_code == 200
+    data = r.json()
+    assert "sentiment_model" in data
+    assert "emotion_model" in data
+    assert "positive" in data["supported_sentiment_labels"]
+    assert "joy" in data["supported_emotion_labels"]
+
+
+# ---------------------------------------------------------------------------
+# Single analysis
+# ---------------------------------------------------------------------------
+
+def test_analyse_valid_text(client):
+    r = client.post("/analyse", json={"text": "I love this!"})
+    assert r.status_code == 200
+    data = r.json()
+
+    assert "sentiment" in data
+    assert "emotions" in data
+    assert data["sentiment"]["label"] in {"positive", "negative", "neutral"}
+    assert 0.0 <= data["sentiment"]["score"] <= 1.0
+    assert len(data["sentiment"]["all_scores"]) == 3
+
+    assert data["emotions"]["dominant_emotion"] in {
+        "joy", "sadness", "anger", "fear", "surprise", "disgust", "neutral"
+    }
+    assert len(data["emotions"]["all_emotions"]) == 7
+
+
+def test_analyse_returns_char_count(client):
+    text = "Hello world"
+    r = client.post("/analyse", json={"text": text})
+    assert r.status_code == 200
+    assert r.json()["char_count"] == len(text)
+
+
+def test_analyse_scores_sorted_descending(client):
+    r = client.post("/analyse", json={"text": "Great day!"})
+    assert r.status_code == 200
+    scores = [s["score"] for s in r.json()["sentiment"]["all_scores"]]
+    assert scores == sorted(scores, reverse=True)
+
+
+# ---------------------------------------------------------------------------
+# Validation errors
+# ---------------------------------------------------------------------------
+
+def test_analyse_empty_text(client):
+    r = client.post("/analyse", json={"text": ""})
+    assert r.status_code == 422
+
+
+def test_analyse_missing_body(client):
+    r = client.post("/analyse", json={})
+    assert r.status_code == 422
+
+
+def test_analyse_text_too_long(client):
+    r = client.post("/analyse", json={"text": "a" * 513})
+    assert r.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# Bulk analysis
+# ---------------------------------------------------------------------------
+
+def test_bulk_valid(client):
+    r = client.post("/analyse/bulk", json={"texts": ["Good", "Bad", "Okay"]})
+    assert r.status_code == 200
+    data = r.json()
+    assert data["count"] == 3
+    assert len(data["results"]) == 3
+    for item in data["results"]:
+        assert "index" in item
+
+
+def test_bulk_too_many_items(client):
+    r = client.post("/analyse/bulk", json={"texts": ["text"] * 11})
+    assert r.status_code == 422
+
+
+def test_bulk_empty_list(client):
+    r = client.post("/analyse/bulk", json={"texts": []})
+    assert r.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# Demo endpoint
+# ---------------------------------------------------------------------------
+
+def test_demo_endpoint(client):
+    r = client.get("/analyse/demo")
+    assert r.status_code == 200
+    data = r.json()
+    assert "sentiment" in data
+    assert "emotions" in data
+
+
+# ---------------------------------------------------------------------------
+# Root UI
+# ---------------------------------------------------------------------------
+
+def test_root_returns_html(client):
+    r = client.get("/")
+    assert r.status_code == 200
+    assert "text/html" in r.headers["content-type"]
+    assert b"SentimentAPI" in r.content
